@@ -1,0 +1,15 @@
+# —— Google repo / 上游层 —— 
+.repo/*
+layers/             # 上游层由 repo 管，不在此仓跟踪
+
+build*/*
+
+.vscode/
+.idea/
+.venv/
+*.swp
+*.log
+
+# keep conf files
+!build*/conf
+!.repo/local_manifests
