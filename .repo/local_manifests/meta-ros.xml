@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <!-- 任选一个远端；下面用 GitHub 为例 -->
+  <remote  name="github-ros" fetch="https://github.com/" />
+
+  <!-- revision 可以用分支名（如 jazzy 对应的分支）或**固定到具体 commit** -->
+  <project path="layers/meta-ros"
+           name="ros/meta-ros"
+           remote="github"
+           revision="refs/heads/master" />
+  <!-- 建议稳定后改成具体 commit： revision="a1b2c3d4..." -->
+</manifest>
