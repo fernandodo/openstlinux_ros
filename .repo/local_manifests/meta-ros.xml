@@ -7,6 +7,6 @@
   <project path="layers/meta-ros"
            name="ros/meta-ros"
            remote="github"
-           revision="refs/heads/master" />
+           revision="e1380ca5b04ff6b1923e866ba2bb18fa613af8db" />
   <!-- 建议稳定后改成具体 commit： revision="a1b2c3d4..." -->
 </manifest>
