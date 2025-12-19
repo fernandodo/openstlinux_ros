@@ -1,0 +1,24 @@
+
+# 只用8个核心跑
+BB_NUMBER_THREADS=8 PARALLEL_MAKE="-j8" bitbake mp257-st-ros-base
+
+# 生成sdk
+bitbake mp257-st-ros-base -c populate_sdk
+
+
+# 性能模式 查看功率
+sudo cpupower frequency-set -g performance
+sudo turbostat --show PkgWatt,Bzy_MHz,Busy%
+
+# 在同一条命令里跑 bitbake，期间禁止 idle/sleep/合盖动作
+systemd-inhibit --what=idle:sleep:handle-lid-switch --why="Yocto build" \
+  bash -c 'xset s off; xset s noblank; xset -dpms; echo "Keep awake: running, press Ctrl+C to stop."; sleep infinity'
+
+# 恢复屏幕
+
+source layers/meta-st/scripts/envsetup.sh 
+sudo apparmor_parser -R /etc/apparmor.d/unprivileged_userns
+
+
+bitbake -c clean virtual/kernel;bitbake virtual/kernel -c configure -f;bitbake virtual/kernel -c shared_workdir -f
+bitbake -c cleansstate lttng-modules;bitbake lttng-modules
