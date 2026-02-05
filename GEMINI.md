@@ -3,6 +3,22 @@
 ## Project Overview
 This project is an **OpenSTLinux** (Yocto Project) distribution targeting the **STM32MP25** platform (`stm32mp25-disco`). It integrates **ROS 2 Jazzy** and uses a custom layer (`meta-myprod`) for project-specific configurations and recipe overrides.
 
+## Remote Target & Build Environment
+
+### Remote Target
+- **SSH Alias:** `stm32ros2`
+- **Usage:** Used for all `ssh` and `scp` commands to interact with the target board.
+
+### Build Environment
+1.  **Mandatory Setup:** Before running any `bitbake` command, the environment must be initialized:
+    ```bash
+    source layers/meta-st/scripts/envsetup.sh
+    ```
+2.  **Permission Fix (If Needed):** If `bitbake` commands fail with a `PermissionError` related to `uid_map`, it is likely due to AppArmor restrictions. This command resolves the issue:
+    ```bash
+    sudo apparmor_parser -R /etc/apparmor.d/unprivileged_userns
+    ```
+
 ## Architecture
 
 ### Key Layers
@@ -18,13 +34,6 @@ This project is an **OpenSTLinux** (Yocto Project) distribution targeting the **
 *   **Distro**: `openstlinux-weston` (Wayland/Weston backend)
 
 ## Building and Running
-
-### Environment Setup
-Before running any `bitbake` commands, initialize the build environment:
-
-```bash
-source layers/meta-st/scripts/envsetup.sh
-```
 
 ### Common Commands
 These commands are sourced from `commands.txt` and represent the standard workflow for this project.

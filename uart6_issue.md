@@ -63,40 +63,107 @@ The newly compiled `.dtb` was deployed to the target board (`stm32ros2`), and th
 
 ---
 
-## 2. Failure Analysis
+## 2. Deeper Analysis: The Root Cause
 
-After rebooting the board, the UART6 device **did not appear**. The `/dev/ttySTM6` node was absent.
+### 2.1 Kernel Log Analysis
 
-Analysis of the kernel log (`dmesg`) revealed the root cause:
+Analysis of the kernel log (`dmesg`) revealed the initial symptom:
 
 **Key Kernel Log Message:**
 ```
 [    1.328426] stm32-rifsc 42080000.bus: serial@40220000: Device driver will not be probed, error: -13
 ```
+This `EACCES` (Permission Denied) error pointed towards a security firewall issue.
 
-**Interpretation:**
+### 2.2 TF-A Device Tree Investigation
 
--   **`stm32-rifsc`**: This is the **Resource Isolation Firewall** controller for the STM32MP processor. It's a security feature that controls which processing unit (e.g., Secure Cortex-M33, Non-secure Cortex-A35) can access which peripheral.
--   **`serial@40220000`**: This is the physical address of **`usart6`**.
--   **`error: -13`**: This corresponds to the Linux error code `EACCES`, which means **Permission Denied**.
+The root cause was found in the Trusted Firmware-A (TF-A) device tree, which configures the RIFSC (Resource Isolation Firewall).
 
-**Conclusion:**
-The Linux kernel, running in the non-secure world on the Cortex-A35 core, was explicitly **blocked by the RIFSC hardware firewall** from accessing the UART6 peripheral. This security configuration is established by the boot firmware (specifically, **Trusted Firmware-A / TF-A**) before the Linux kernel even starts. Modifying the Linux device tree alone is insufficient because the hardware access is denied at a lower level.
+- **File:** `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/optee/stm32mp257f-dk-ca35tdcid-ostl-rif.dtsi`
+- **Problematic Configuration:**
+  ```dts
+  &rifsc {
+          st,protreg = <
+                  ...
+                  RIFPROT(STM32MP25_RIFSC_USART6_ID, RIF_UNUSED, RIF_UNLOCK, RIF_NSEC, RIF_NPRIV, RIF_CID2, RIF_SEM_DIS, RIF_CFEN)
+                  ...
+          >;
+  };
+  ```
+
+**Interpretation of `RIFPROT` for USART6:**
+
+- `RIF_NSEC`: Correctly assigned to the Non-Secure world (where Linux runs).
+- `RIF_NPRIV`: **Incorrect.** Assigned as Non-Privileged. The Linux kernel requires **Privileged (`RIF_PRIV`)** access to control peripherals.
+- `RIF_CID2`: **Incorrect.** Assigned to Component ID 2 (typically the Cortex-M33 core). The Linux kernel runs on the Cortex-A35, which requires **CID 1 (`RIF_CID1`)**.
+
+**Final Conclusion:**
+The Linux kernel is blocked from accessing UART6 because the boot firmware (TF-A) configures the hardware firewall to deny it the necessary privilege level and component ID. Both the TF-A RIFSC configuration and the Linux device tree status must be corrected.
 
 ---
 
-## 3. Next Action Plan: Modify TF-A Configuration
+## 3. Deeper Investigation: The `external-dt` Mechanism
 
-To fix this, we must modify the configuration of the boot firmware to grant Linux access to UART6.
+Further investigation into the Yocto build system revealed how these configurations are managed:
 
-**Objective:**
-Modify the **Trusted Firmware-A (TF-A) device tree** to assign `usart6` to the non-secure world, making it accessible to the Linux kernel.
+1.  **`external-dt.bbclass`**: The `linux-stm32mp` recipe inherits this class. This class is responsible for managing device tree files that are "external" to the main source code of a component.
+2.  **`work-shared` as a Staging Area**: The directory `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/${MACHINE}/external-dt/` is a **shared input tree (staging area)**. It contains the device tree sources (DTS/DTSI) that are ultimately consumed by both TF-A and the Linux kernel during their respective build processes. These files are typically generated or copied into this location by a specific recipe.
+3.  **`bitbake -e` Analysis:**
+    *   **`tf-a-stm32mp` recipe**:
+        ```
+        TF_A_CONFIG_OPTS_EXTDT=/home/felux/Projects/st/openstlinux/build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/tf-a
+        ```
+        This shows that `tf-a-stm32mp` consumes TF-A specific device tree files from the `external-dt` staging area via the `TFA_EXTERNAL_DT` makefile variable.
+    *   **`linux-stm32mp` recipe**:
+        ```
+        KBUILD_EXTDTS=/home/felux/Projects/st/openstlinux/build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/linux
+        ```
+        This shows that `linux-stm32mp` consumes Linux specific device tree files from the `external-dt` staging area via the `KBUILD_EXTDTS` makefile variable.
+
+**Conclusion from `bitbake -e`**: The `linux-stm32mp` recipe is the *provider* that populates the `work-shared/external-dt` directory with the device tree source files for both Linux and TF-A. The `tf-a-stm32mp` recipe then *consumes* the TF-A specific files from this shared location.
+
+---
+
+## 4. Next Action Plan: The Correct Permanent Solution (Yocto-friendly)
+
+**Final Conclusion (Refined):**
+The root cause is a misconfiguration in the TF-A's RIFSC (Resource Isolation Firewall) device tree, which assigns `USART6` to the wrong Component ID (CID2) and with insufficient privilege (`RIF_NPRIV`), thus blocking the Linux kernel (running on A35, CID1, requiring privileged access). This leads to the `EACCES` (`-13`) error. The solution requires a two-pronged approach: correcting the TF-A RIFSC configuration and explicitly enabling `usart6` in the Linux device tree. Both changes must be applied in a Yocto-compatible, maintainable way.
+
+**The Fix:**
+
+1.  **TF-A RIFSC Configuration Patch**: Modify the TF-A device tree source to allow the A35 core (CID1) privileged access to `USART6`.
+    *   **Target File**: `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/optee/stm32mp257f-dk-ca35tdcid-ostl-rif.dtsi`
+    *   **Change**: Update the `RIFPROT` entry for `USART6` from `RIF_NPRIV, RIF_CID2` to `RIF_PRIV, RIF_CID1` (keeping `RIF_NSEC`).
+
+2.  **Linux Device Tree Patch**: Enable `usart6` and ensure correct pin control.
+    *   **Target File**: `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/linux/stm32mp257f-dk-ca35tdcid-ostl.dts` (or an included `dtsi`).
+    *   **Change**: Set `status = "okay"` and verify `pinctrl` points to the correct pins (e.g., connected to CN5 EXP_GPIO14/15).
+
+**Yocto Implementation Strategy:**
+
+The patches will be injected into the build process via a `bbappend` file in our custom layer (`meta-myprod`). Since the `linux-stm32mp` recipe is responsible for populating the `work-shared/external-dt` directory, its `bbappend` is the correct place to apply these modifications.
 
 **High-Level Steps:**
 
-1.  **Locate TF-A Device Tree Source:** We need to find the `.dts` or `.dtsi` files used by the `tf-a-stm32mp` Yocto recipe. This will involve inspecting the recipe's `SRC_URI` and source code.
-2.  **Modify RIFSC Configuration:** Within the TF-A device tree, we must find the RIFSC node and change the peripheral allocation to move `usart6` (or its corresponding RIFSC ID) to the non-secure (NS) domain.
-3.  **Create Patch and `bbappend`:** A patch file containing the device tree modification must be created. Then, a `tf-a-stm32mp_%.bbappend` file will be created in the `meta-myprod` layer to apply this patch during the build.
-4.  **Full Rebuild and Deploy:** A full image rebuild (`bitbake mp257-st-ros-base`) will be necessary. This ensures that the bootloader firmware (e.g., `fip.bin`, containing the updated TF-A) is re-generated and included in the final image to be flashed to the board.
+1.  **Create Patch Files**:
+    *   `0001-tf-a-rifsc-enable-uart6-priv-cid1.patch`: Modifies the TF-A RIFSC `dtsi` file.
+    *   `0002-linux-dts-enable-uart6-status-okay.patch`: Modifies the Linux `dts` file.
 
-```
+2.  **Create `meta-myprod/recipes-kernel/linux/linux-stm32mp_%.bbappend`**:
+    *   Add both patch files to the `SRC_URI`.
+    *   Implement a `do_configure:prepend()` task hook. This hook will ensure that the patches are applied to the device tree files *after* they have been copied into the recipe's `WORKDIR` (which includes the `external-dt` files from `work-shared`), but *before* the main configuration and compilation steps for `linux-stm32mp`.
+
+3.  **Rebuild and Deploy**:
+    *   Clean the relevant `linux-stm32mp` recipe: `bitbake linux-stm32mp -c cleanall`.
+    *   Rebuild the main image: `bitbake mp257-st-ros-base`. This will ensure both the Linux DTB and the TF-A firmware (`fip.bin`) are correctly regenerated with the new permissions.
+    *   Flash the updated image or components to the board.
+
+**Fastest Verification Path:**
+
+To quickly ascertain if the RIFSC permission issue has been resolved:
+
+1.  **Apply only the TF-A RIFSC configuration patch** (via `linux-stm32mp_%.bbappend`).
+2.  **Rebuild and flash** the firmware (`fip.bin`).
+3.  **Check `dmesg` on the target**: Look for the `driver will not be probed, error:-13` message for `serial@40220000`. If it's gone, the permission barrier is broken.
+4.  **Then, apply the Linux DTS patch** to enable `usart6` and verify the appearance of `/dev/ttySTMx`.
+

@@ -1,0 +1,12 @@
+--- a/stm32mp2/a35-td/linux/stm32mp257f-dk-ca35tdcid-ostl.dts
++++ b/stm32mp2/a35-td/linux/stm32mp257f-dk-ca35tdcid-ostl.dts
+@@ -668,7 +668,7 @@
+ 	pinctrl-1 = <&usart6_idle_pins_a>;
+ 	pinctrl-2 = <&usart6_sleep_pins_a>;
+ 	uart-has-rtscts;
+-	status = "disabled";
++	status = "okay";
+ };
+ 
+ &usb2_phy1 {
+
