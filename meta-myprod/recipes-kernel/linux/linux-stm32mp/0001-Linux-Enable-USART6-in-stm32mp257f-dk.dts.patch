@@ -1,0 +1,24 @@
+From 8fb654682dffc1622b405ef777932129496f1601 Mon Sep 17 00:00:00 2001
+From: Fei Luo <axl.luo@gmail.com>
+Date: Sun, 8 Feb 2026 10:52:54 +1300
+Subject: [PATCH] Linux: Enable USART6 in stm32mp257f-dk.dts
+
+---
+ arch/arm64/boot/dts/st/stm32mp257f-dk.dts | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/st/stm32mp257f-dk.dts b/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
+index 88bafebef..e0890571b 100644
+--- a/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
++++ b/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
+@@ -799,9 +799,7 @@ &usart6 {
+ 	pinctrl-0 = <&usart6_pins_a>;
+ 	pinctrl-1 = <&usart6_idle_pins_a>;
+ 	pinctrl-2 = <&usart6_sleep_pins_a>;
+-	uart-has-rtscts;
+-	status = "disabled";
+-};
++	        status = "okay";};
+ 
+ &usb2_phy1 {
+ 	vdd33-supply = <&scmi_vdd3v3_usb>;

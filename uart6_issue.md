@@ -1,169 +1,63 @@
-# Debugging UART6 Enablement on STM32MP257F-DK
+# Debugging Yocto `devtool` and Environment Setup Issue
 
-This document records the steps taken to enable `UART6`, the analysis of its failure, and the future plan to resolve the issue.
+This document summarizes the challenges encountered while attempting to use `devtool` within the Gemini CLI environment for modifying Yocto recipes, and the steps taken to resolve them.
 
-## 1. Attempted Method: Manual Linux DTB Modification
+## Problem Description
 
-The initial approach was to directly modify the Linux Device Tree to enable the `usart6` node, compile it, and deploy it to the board, bypassing a full Yocto build for quick verification.
+The primary objective was to modify device tree source (DTS) files for OP-TEE and the Linux kernel within a Yocto project and apply these changes as patches via `devtool`. Initial attempts to use `devtool` commands (e.g., `devtool unpack`, `devtool modify`, `devtool finish`) consistently resulted in errors such as `devtool: command not found` or reports that the Yocto environment was not initialized, even after sourcing `layers/meta-st/scripts/envsetup.sh`.
 
-### Step 1: Locate and Modify the Target DTS
+## Root Cause Analysis
 
-The specific Device Tree Source (DTS) file being used by the board was identified in the build's temporary work directory:
-- **File:** `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/linux/stm32mp257f-dk-ca35tdcid-ostl.dts`
+The root cause was a combination of factors related to how the Gemini CLI agent executes shell commands and how Yocto environment scripts (specifically `envsetup.sh` and `oe-init-build-env`) modify the shell's `PATH` and other environment variables.
 
-The `&usart6` node within this file was modified as follows:
+1.  **Environment Isolation:** Each `run_shell_command` call by the Gemini CLI agent often operates in a new, isolated subshell environment. Environment changes (like `PATH` modifications) made by sourcing scripts in one `run_shell_command` might not persist or propagate correctly to subsequent, separate `run_shell_command` calls.
+2.  **`PATH` Not Updated:** Initial `echo $PATH` commands confirmed that Yocto's `bin` directories (where `devtool` resides) were not consistently being added to the agent's `PATH`.
+3.  **`devtool` Location:** `devtool` was not found in standard system `PATH` locations. A broad search located it at `/home/felux/Projects/st/openstlinux/layers/openembedded-core/scripts/devtool`.
+4.  **Incomplete Environment for Direct Execution:** Even when `devtool` was executed using its absolute path, it reported `ERROR: This script can only be run after initialising the build environment`, indicating that other crucial environment variables (beyond just `PATH`) were not correctly set.
 
-**From:**
-```dts
-&usart6 {
-        pinctrl-names = "default", "idle", "sleep";
-        pinctrl-0 = <&usart6_pins_a>;
-        pinctrl-1 = <&usart6_idle_pins_a>;
-        pinctrl-2 = <&usart6_sleep_pins_a>;
-        uart-has-rtscts;
-        status = "disabled";
-};
-```
+## Solution
 
-**To:**
-```dts
-&usart6 {
-        pinctrl-names = "default", "idle", "sleep";
-        pinctrl-0 = <&usart6_pins_a>;
-        pinctrl-1 = <&usart6_idle_pins_a>;
-        pinctrl-2 = <&usart6_sleep_pins_a>;
-        /* uart-has-rtscts; */
-        status = "okay";
-};
-```
+The solution involved ensuring that the `source` command for the Yocto environment setup and the `devtool` command were executed within the *same shell context* to guarantee proper environment propagation.
 
-### Step 2: Manually Compile the DTB
+**Key Discovery:** Executing the `source` command and the `devtool` command on a single line, separated by `&&`, resolved the environment issues. This forces the `devtool` command to run within the shell context where `source` has just modified the environment.
 
-The modified DTS file was manually compiled into a Device Tree Blob (`.dtb`) using the `cpp` (pre-processor) and `dtc` (compiler) from the build environment.
+**Steps to resolve and generate patches:**
 
-```bash
-# Define paths
-KERNEL_SRC="build-openstlinuxweston-stm32mp25-disco/workspace/sources/linux-stm32mp"
-DTS_FILE="build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/linux/stm32mp257f-dk-ca35tdcid-ostl.dts"
-DTB_OUT="stm32mp257f-dk-ca35tdcid-ostl.dtb"
+1.  **Locate `devtool` executable:** Identified `devtool`'s absolute path at `/home/felux/Projects/st/openstlinux/layers/openembedded-core/scripts/devtool`.
+2.  **Modify Source Tree using `devtool modify`:**
+    *   Command: `source layers/meta-st/scripts/envsetup.sh && devtool modify <recipe-name>`
+    *   This successfully extracted the recipe's source into `build-openstlinuxweston-stm32mp25-disco/workspace/sources/<recipe-name>`.
+3.  **Apply DTS Modifications:** Used `replace` to modify the target DTS file within the workspace.
+4.  **Commit Changes in Workspace:** Navigated to the `devtool` workspace directory (`build-openstlinuxweston-stm32mp25-disco/workspace/sources/<recipe-name>`) and manually committed the changes using standard `git add` and `git commit` commands. This was crucial for `devtool finish` to detect the modifications.
+5.  **Generate Patch using `devtool finish`:**
+    *   Command: `source layers/meta-st/scripts/envsetup.sh && devtool finish -f <recipe-name> <layer-path>`
+    *   The `-f` (force) flag was used to bypass "source tree not clean" warnings.
+    *   `layer-path` was specified as `/home/felux/Projects/st/openstlinux/meta-myprod/`. This correctly generated the patch file and the corresponding `.bbappend` file within `meta-myprod`.
 
-# Pre-process and Compile
-cpp -nostdinc -I ${KERNEL_SRC}/include -I ${KERNEL_SRC}/arch/arm64/boot/dts/st \
-    -undef -D__DTS__ -x assembler-with-cpp \
-    ${DTS_FILE} > temp.dts.preprocessed
+**Example Commands used:**
 
-dtcs -I dts -O dtb -o ${DTB_OUT} temp.dts.preprocessed
+*   **For OP-TEE (`optee-os-stm32mp`):**
+    ```bash
+    source layers/meta-st/scripts/envsetup.sh && devtool modify optee-os-stm32mp
+    # (after DTS modification and manual git commit in workspace)
+    source layers/meta-st/scripts/envsetup.sh && devtool finish -f optee-os-stm32mp /home/felux/Projects/st/openstlinux/meta-myprod/
+    ```
 
-rm temp.dts.preprocessed
-```
+*   **For Linux Kernel (`linux-stm32mp`):**
+    ```bash
+    source layers/meta-st/scripts/envsetup.sh && devtool modify linux-stm32mp
+    # (after DTS modification and manual git commit in workspace)
+    source layers/meta-st/scripts/envsetup.sh && devtool finish -f linux-stm32mp /home/felux/Projects/st/openstlinux/meta-myprod/
+    ```
 
-### Step 3: Deploy to Target
+## Post-Mortem and Cleanup
 
-The newly compiled `.dtb` was deployed to the target board (`stm32ros2`), and the board was rebooted.
+During the troubleshooting, due to confusion regarding `devtool finish`'s output, `bbappend` files were initially manually created in incorrect subdirectory locations, leading to duplicates. These duplicates were subsequently identified and removed to ensure the correct Yocto layer structure.
 
----
+The correct structure for `bbappend` files created by `devtool finish` in a specified layer `meta-myprod` is:
+*   `meta-myprod/recipes-security/optee/optee-os-stm32mp_%.bbappend`
+*   `meta-myprod/recipes-kernel/linux/linux-stm32mp_%.bbappend`
 
-## 2. Deeper Analysis: The Root Cause
-
-### 2.1 Kernel Log Analysis
-
-Analysis of the kernel log (`dmesg`) revealed the initial symptom:
-
-**Key Kernel Log Message:**
-```
-[    1.328426] stm32-rifsc 42080000.bus: serial@40220000: Device driver will not be probed, error: -13
-```
-This `EACCES` (Permission Denied) error pointed towards a security firewall issue.
-
-### 2.2 TF-A Device Tree Investigation
-
-The root cause was found in the Trusted Firmware-A (TF-A) device tree, which configures the RIFSC (Resource Isolation Firewall).
-
-- **File:** `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/optee/stm32mp257f-dk-ca35tdcid-ostl-rif.dtsi`
-- **Problematic Configuration:**
-  ```dts
-  &rifsc {
-          st,protreg = <
-                  ...
-                  RIFPROT(STM32MP25_RIFSC_USART6_ID, RIF_UNUSED, RIF_UNLOCK, RIF_NSEC, RIF_NPRIV, RIF_CID2, RIF_SEM_DIS, RIF_CFEN)
-                  ...
-          >;
-  };
-  ```
-
-**Interpretation of `RIFPROT` for USART6:**
-
-- `RIF_NSEC`: Correctly assigned to the Non-Secure world (where Linux runs).
-- `RIF_NPRIV`: **Incorrect.** Assigned as Non-Privileged. The Linux kernel requires **Privileged (`RIF_PRIV`)** access to control peripherals.
-- `RIF_CID2`: **Incorrect.** Assigned to Component ID 2 (typically the Cortex-M33 core). The Linux kernel runs on the Cortex-A35, which requires **CID 1 (`RIF_CID1`)**.
-
-**Final Conclusion:**
-The Linux kernel is blocked from accessing UART6 because the boot firmware (TF-A) configures the hardware firewall to deny it the necessary privilege level and component ID. Both the TF-A RIFSC configuration and the Linux device tree status must be corrected.
-
----
-
-## 3. Deeper Investigation: The `external-dt` Mechanism
-
-Further investigation into the Yocto build system revealed how these configurations are managed:
-
-1.  **`external-dt.bbclass`**: The `linux-stm32mp` recipe inherits this class. This class is responsible for managing device tree files that are "external" to the main source code of a component.
-2.  **`work-shared` as a Staging Area**: The directory `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/${MACHINE}/external-dt/` is a **shared input tree (staging area)**. It contains the device tree sources (DTS/DTSI) that are ultimately consumed by both TF-A and the Linux kernel during their respective build processes. These files are typically generated or copied into this location by a specific recipe.
-3.  **`bitbake -e` Analysis:**
-    *   **`tf-a-stm32mp` recipe**:
-        ```
-        TF_A_CONFIG_OPTS_EXTDT=/home/felux/Projects/st/openstlinux/build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/tf-a
-        ```
-        This shows that `tf-a-stm32mp` consumes TF-A specific device tree files from the `external-dt` staging area via the `TFA_EXTERNAL_DT` makefile variable.
-    *   **`linux-stm32mp` recipe**:
-        ```
-        KBUILD_EXTDTS=/home/felux/Projects/st/openstlinux/build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/linux
-        ```
-        This shows that `linux-stm32mp` consumes Linux specific device tree files from the `external-dt` staging area via the `KBUILD_EXTDTS` makefile variable.
-
-**Conclusion from `bitbake -e`**: The `linux-stm32mp` recipe is the *provider* that populates the `work-shared/external-dt` directory with the device tree source files for both Linux and TF-A. The `tf-a-stm32mp` recipe then *consumes* the TF-A specific files from this shared location.
-
----
-
-## 4. Next Action Plan: The Correct Permanent Solution (Yocto-friendly)
-
-**Final Conclusion (Refined):**
-The root cause is a misconfiguration in the TF-A's RIFSC (Resource Isolation Firewall) device tree, which assigns `USART6` to the wrong Component ID (CID2) and with insufficient privilege (`RIF_NPRIV`), thus blocking the Linux kernel (running on A35, CID1, requiring privileged access). This leads to the `EACCES` (`-13`) error. The solution requires a two-pronged approach: correcting the TF-A RIFSC configuration and explicitly enabling `usart6` in the Linux device tree. Both changes must be applied in a Yocto-compatible, maintainable way.
-
-**The Fix:**
-
-1.  **TF-A RIFSC Configuration Patch**: Modify the TF-A device tree source to allow the A35 core (CID1) privileged access to `USART6`.
-    *   **Target File**: `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/optee/stm32mp257f-dk-ca35tdcid-ostl-rif.dtsi`
-    *   **Change**: Update the `RIFPROT` entry for `USART6` from `RIF_NPRIV, RIF_CID2` to `RIF_PRIV, RIF_CID1` (keeping `RIF_NSEC`).
-
-2.  **Linux Device Tree Patch**: Enable `usart6` and ensure correct pin control.
-    *   **Target File**: `build-openstlinuxweston-stm32mp25-disco/tmp-glibc/work-shared/stm32mp25-disco/external-dt/stm32mp2/a35-td/linux/stm32mp257f-dk-ca35tdcid-ostl.dts` (or an included `dtsi`).
-    *   **Change**: Set `status = "okay"` and verify `pinctrl` points to the correct pins (e.g., connected to CN5 EXP_GPIO14/15).
-
-**Yocto Implementation Strategy:**
-
-The patches will be injected into the build process via a `bbappend` file in our custom layer (`meta-myprod`). Since the `linux-stm32mp` recipe is responsible for populating the `work-shared/external-dt` directory, its `bbappend` is the correct place to apply these modifications.
-
-**High-Level Steps:**
-
-1.  **Create Patch Files**:
-    *   `0001-tf-a-rifsc-enable-uart6-priv-cid1.patch`: Modifies the TF-A RIFSC `dtsi` file.
-    *   `0002-linux-dts-enable-uart6-status-okay.patch`: Modifies the Linux `dts` file.
-
-2.  **Create `meta-myprod/recipes-kernel/linux/linux-stm32mp_%.bbappend`**:
-    *   Add both patch files to the `SRC_URI`.
-    *   Implement a `do_configure:prepend()` task hook. This hook will ensure that the patches are applied to the device tree files *after* they have been copied into the recipe's `WORKDIR` (which includes the `external-dt` files from `work-shared`), but *before* the main configuration and compilation steps for `linux-stm32mp`.
-
-3.  **Rebuild and Deploy**:
-    *   Clean the relevant `linux-stm32mp` recipe: `bitbake linux-stm32mp -c cleanall`.
-    *   Rebuild the main image: `bitbake mp257-st-ros-base`. This will ensure both the Linux DTB and the TF-A firmware (`fip.bin`) are correctly regenerated with the new permissions.
-    *   Flash the updated image or components to the board.
-
-**Fastest Verification Path:**
-
-To quickly ascertain if the RIFSC permission issue has been resolved:
-
-1.  **Apply only the TF-A RIFSC configuration patch** (via `linux-stm32mp_%.bbappend`).
-2.  **Rebuild and flash** the firmware (`fip.bin`).
-3.  **Check `dmesg` on the target**: Look for the `driver will not be probed, error:-13` message for `serial@40220000`. If it's gone, the permission barrier is broken.
-4.  **Then, apply the Linux DTS patch** to enable `usart6` and verify the appearance of `/dev/ttySTMx`.
-
+Patches are placed in subdirectories like:
+*   `meta-myprod/recipes-security/optee/optee-os-stm32mp/0001-OP-TEE-Enable-non-secure-access-for-USART6-RIF.patch`
+*   `meta-myprod/recipes-kernel/linux/linux-stm32mp/0001-Linux-Enable-USART6-in-stm32mp257f-dk.dts.patch`
