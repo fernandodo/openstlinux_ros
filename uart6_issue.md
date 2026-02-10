@@ -1,63 +1,73 @@
-# Debugging Yocto `devtool` and Environment Setup Issue
 
-This document summarizes the challenges encountered while attempting to use `devtool` within the Gemini CLI environment for modifying Yocto recipes, and the steps taken to resolve them.
+# USART6 Access Issue and Resolution for STM32MP257F-DK
 
-## Problem Description
+## Problem
 
-The primary objective was to modify device tree source (DTS) files for OP-TEE and the Linux kernel within a Yocto project and apply these changes as patches via `devtool`. Initial attempts to use `devtool` commands (e.g., `devtool unpack`, `devtool modify`, `devtool finish`) consistently resulted in errors such as `devtool: command not found` or reports that the Yocto environment was not initialized, even after sourcing `layers/meta-st/scripts/envsetup.sh`.
+On the STM32MP257F-DK, attempting to enable `USART6` for the Cortex-A35 (Linux, `RIF_CID1`), which is by default assigned to the Cortex-M33 (`RIF_CID2`), resulted in a repeatable OP-TEE panic in `stm32_iac.c` (specifically `stm32_iac.c:212 <stm32_iac_itr>`). The Linux kernel would report a `-13 (EACCES)` error.
 
-## Root Cause Analysis
-
-The root cause was a combination of factors related to how the Gemini CLI agent executes shell commands and how Yocto environment scripts (specifically `envsetup.sh` and `oe-init-build-env`) modify the shell's `PATH` and other environment variables.
-
-1.  **Environment Isolation:** Each `run_shell_command` call by the Gemini CLI agent often operates in a new, isolated subshell environment. Environment changes (like `PATH` modifications) made by sourcing scripts in one `run_shell_command` might not persist or propagate correctly to subsequent, separate `run_shell_command` calls.
-2.  **`PATH` Not Updated:** Initial `echo $PATH` commands confirmed that Yocto's `bin` directories (where `devtool` resides) were not consistently being added to the agent's `PATH`.
-3.  **`devtool` Location:** `devtool` was not found in standard system `PATH` locations. A broad search located it at `/home/felux/Projects/st/openstlinux/layers/openembedded-core/scripts/devtool`.
-4.  **Incomplete Environment for Direct Execution:** Even when `devtool` was executed using its absolute path, it reported `ERROR: This script can only be run after initialising the build environment`, indicating that other crucial environment variables (beyond just `PATH`) were not correctly set.
+The root cause is the Resource Isolation Framework (RIF) configuration in OP-TEE, which restricts access to peripherals. A direct change in the TF-A device tree's `RIFPROT` was insufficient and caused secure world panics. The solution requires explicit permissioning in the OP-TEE device tree and enabling the peripheral in the Linux kernel device tree.
 
 ## Solution
 
-The solution involved ensuring that the `source` command for the Yocto environment setup and the `devtool` command were executed within the *same shell context* to guarantee proper environment propagation.
+The correct approach involves modifying both the OP-TEE device tree and the Linux kernel device tree, applying these changes via Yocto patches within a custom layer (`meta-myprod`).
 
-**Key Discovery:** Executing the `source` command and the `devtool` command on a single line, separated by `&&`, resolved the environment issues. This forces the `devtool` command to run within the shell context where `source` has just modified the environment.
+### 1. OP-TEE Device Tree Modification
 
-**Steps to resolve and generate patches:**
+The OP-TEE device tree (`core/arch/arm/dts/stm32mp257f-dk.dts` within the OP-TEE source) needs to be modified to grant `RIF_CID1` (Cortex-A35) non-secure access to `USART6` and declare it.
 
-1.  **Locate `devtool` executable:** Identified `devtool`'s absolute path at `/home/felux/Projects/st/openstlinux/layers/openembedded-core/scripts/devtool`.
-2.  **Modify Source Tree using `devtool modify`:**
-    *   Command: `source layers/meta-st/scripts/envsetup.sh && devtool modify <recipe-name>`
-    *   This successfully extracted the recipe's source into `build-openstlinuxweston-stm32mp25-disco/workspace/sources/<recipe-name>`.
-3.  **Apply DTS Modifications:** Used `replace` to modify the target DTS file within the workspace.
-4.  **Commit Changes in Workspace:** Navigated to the `devtool` workspace directory (`build-openstlinuxweston-stm32mp25-disco/workspace/sources/<recipe-name>`) and manually committed the changes using standard `git add` and `git commit` commands. This was crucial for `devtool finish` to detect the modifications.
-5.  **Generate Patch using `devtool finish`:**
-    *   Command: `source layers/meta-st/scripts/envsetup.sh && devtool finish -f <recipe-name> <layer-path>`
-    *   The `-f` (force) flag was used to bypass "source tree not clean" warnings.
-    *   `layer-path` was specified as `/home/felux/Projects/st/openstlinux/meta-myprod/`. This correctly generated the patch file and the corresponding `.bbappend` file within `meta-myprod`.
+**Specific Modifications to `stm32mp257f-dk.dts` (OP-TEE):**
 
-**Example Commands used:**
-
-*   **For OP-TEE (`optee-os-stm32mp`):**
-    ```bash
-    source layers/meta-st/scripts/envsetup.sh && devtool modify optee-os-stm32mp
-    # (after DTS modification and manual git commit in workspace)
-    source layers/meta-st/scripts/envsetup.sh && devtool finish -f optee-os-stm32mp /home/felux/Projects/st/openstlinux/meta-myprod/
+*   **Add `&usart6` node:** This node needs to be added within the top-level `/` node, typically after the `shadow-prov` block.
+    ```dts
+            &usart6 {
+                /* 授权配置：允许 CID1 (A35) 访问，非安全属性 */
+                access-controllers = <&rifsc 42>; /* 42 是 USART6 在 RIF 中的 ID */
+                status = "okay";
+            };
     ```
 
-*   **For Linux Kernel (`linux-stm32mp`):**
-    ```bash
-    source layers/meta-st/scripts/envsetup.sh && devtool modify linux-stm32mp
-    # (after DTS modification and manual git commit in workspace)
-    source layers/meta-st/scripts/envsetup.sh && devtool finish -f linux-stm32mp /home/felux/Projects/st/openstlinux/meta-myprod/
+*   **Add `s_usart6` sub-node to `&rifsc`:** This block needs to be appended to the file. It configures the RIFSC for `USART6` with the correct base address and non-secure access permissions for `RIF_CID1`.
+    ```dts
+    &rifsc {
+        /* 确保 RIFSC 控制器中没有将 USART6 锁死在安全域 */
+        s_usart6: usart6@40220000 {
+            reg = <0x40220000 0x400>;
+            /* 配置允许非安全访问 */
+            st,prot = <RIF_ALLOW_NS_PRIV | RIF_ALLOW_NS_USER | RIF_ALLOW_S_PRIV | RIF_ALLOW_S_USER>;
+            st,cid = <RIF_CID1_ALLOWED>; /* 允许 CID1 */
+        };
+    };
+    ```
+    **Note on `USART6` address:** The correct base address for `USART6` is `0x40220000`.
+
+### 2. Linux Kernel Device Tree Modification
+
+The Linux kernel device tree (`arch/arm64/boot/dts/st/stm32mp257f-dk.dts` within the Linux kernel source) needs to enable the `USART6` peripheral.
+
+**Specific Modification to `stm32mp257f-dk.dts` (Linux Kernel):**
+
+*   **Change `status` of `&usart6` node:** Modify the existing `&usart6` node to set its `status` property from `"disabled"` to `"okay"`.
+    ```diff
+    --- a/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
+    +++ b/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
+    @@ -x,y +x,y @@
+     &usart6 {
+             pinctrl-names = "default", "idle", "sleep";
+             pinctrl-0 = <&usart6_pins_a>;
+    -        status = "disabled";
+    +        status = "okay";
+     };
     ```
 
-## Post-Mortem and Cleanup
+### 3. Yocto Integration
 
-During the troubleshooting, due to confusion regarding `devtool finish`'s output, `bbappend` files were initially manually created in incorrect subdirectory locations, leading to duplicates. These duplicates were subsequently identified and removed to ensure the correct Yocto layer structure.
+These modifications are applied via patches generated using `devtool` and integrated into the `meta-myprod` custom layer.
 
-The correct structure for `bbappend` files created by `devtool finish` in a specified layer `meta-myprod` is:
-*   `meta-myprod/recipes-security/optee/optee-os-stm32mp_%.bbappend`
-*   `meta-myprod/recipes-kernel/linux/linux-stm32mp_%.bbappend`
+*   **OP-TEE Patch & bbappend:**
+    *   Patch: `0001-OP-TEE-Implement-user-s-recommended-DTS-for-USART6-a.patch` (or similar name) containing the OP-TEE DTS changes.
+    *   `optee-os-stm32mp_%.bbappend` in `meta-myprod/recipes-security/optee/` should reference this patch.
+*   **Linux Kernel Patch & bbappend:**
+    *   Patch: `0001-Linux-Enable-USART6-in-stm32mp257f-dk.dts.patch` (or similar name) containing the Linux DTS changes.
+    *   `linux-stm32mp_%.bbappend` in `meta-myprod/recipes-kernel/linux/` should reference this patch.
 
-Patches are placed in subdirectories like:
-*   `meta-myprod/recipes-security/optee/optee-os-stm32mp/0001-OP-TEE-Enable-non-secure-access-for-USART6-RIF.patch`
-*   `meta-myprod/recipes-kernel/linux/linux-stm32mp/0001-Linux-Enable-USART6-in-stm32mp257f-dk.dts.patch`
+---

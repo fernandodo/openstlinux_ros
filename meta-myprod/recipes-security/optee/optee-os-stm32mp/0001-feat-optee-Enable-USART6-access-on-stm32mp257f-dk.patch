@@ -1,0 +1,33 @@
+From 88f678939215ffed9e26c73dfc4bf22e2deb45f8 Mon Sep 17 00:00:00 2001
+From: Fei Luo <axl.luo@gmail.com>
+Date: Tue, 10 Feb 2026 14:38:03 +1300
+Subject: [PATCH] feat(optee): Enable USART6 access on stm32mp257f-dk
+
+---
+ core/arch/arm/dts/stm32mp257f-dk.dts | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/core/arch/arm/dts/stm32mp257f-dk.dts b/core/arch/arm/dts/stm32mp257f-dk.dts
+index ec175bb67..69d489d10 100644
+--- a/core/arch/arm/dts/stm32mp257f-dk.dts
++++ b/core/arch/arm/dts/stm32mp257f-dk.dts
+@@ -487,3 +487,19 @@
+ 	pinctrl-0 = <&usart2_pins_a>;
+ 	status = "okay";
+ };
++
++&usart6 {
++	/* 关联到 rifsc，42 是 USART6 的硬件 ID */
++	access-controllers = <&rifsc 42>;
++	status = "okay"; /* 记得加引号 */
++};
++
++&rifsc {
++	/* USART6 的寄存器地址是 0x40330000 */
++	s_usart6: usart6@40330000 {
++		reg = <0x40330000 0x400>;
++		/* 关键：允许 A35 (CID1) 进行非安全访问 (NS) */
++		st,prot = <RIF_ALLOW_NS_PRIV | RIF_ALLOW_NS_USER | RIF_ALLOW_S_PRIV | RIF_ALLOW_S_USER>;
++		st,cid = <RIF_CID1_ALLOWED>;
++	};
++};
