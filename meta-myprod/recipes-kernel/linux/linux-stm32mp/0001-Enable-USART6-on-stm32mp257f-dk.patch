@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fei Luo <axl.luo@gmail.com>
+Date: Tue, 10 Feb 2026 14:00:00 +1300
+Subject: [PATCH] Enable USART6 on stm32mp257f-dk
+
+Set USART6 status to "okay" in the Linux kernel device tree for
+STM32MP257F-DK discovery board.
+
+---
+ arch/arm64/boot/dts/st/stm32mp257f-dk.dts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/st/stm32mp257f-dk.dts b/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
+index 88bafebef..e0890571b 100644
+--- a/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
++++ b/arch/arm64/boot/dts/st/stm32mp257f-dk.dts
+@@ -797,7 +797,7 @@
+ 	pinctrl-1 = <&usart6_idle_pins_a>;
+ 	pinctrl-2 = <&usart6_sleep_pins_a>;
+ 	uart-has-rtscts;
+-	status = "disabled";
++	status = "okay";
+ };
+ 
+ &usb2_phy1 {
+-- 
+2.34.1
+
